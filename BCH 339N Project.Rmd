@@ -1,0 +1,851 @@
+---
+title: "BCH 339N Project"
+author: "Alice Gee"
+date: "4/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(BiocManager)
+library(DESeq2)
+library(BiocParallel)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(sys)
+library(knitr)
+library(pheatmap)
+```
+
+```{r}
+## rnaCounts: data.frame containing RNA-seq counts for each gene in each sample
+## (genes are in rows of data.frame, samples in columns):
+rnaCounts = read.table("rna_counts.tsv.gz",
+                       sep="\t", header=TRUE, row.names=1, check.names=FALSE)
+
+## riboCounts: data.frame containing ribo-seq counts for each gene in each sample
+## (genes are in rows of data.frame, samples in columns):
+riboCounts = read.table("ribo_counts.tsv.gz",
+                        sep="\t", header=TRUE, row.names=1, check.names=FALSE)
+
+## sampleAnnotation: data.frame with one row per sample; columns say what
+## group (=combination of genotype+time), genotype, and time
+## describe each sample:
+sampleAnnotation = read.table("rna_sample_annotation.tsv",
+                              sep="\t", header=TRUE, row.names=1, check.names=FALSE)
+
+## sampleAnnotation2: data.frame with one row per sample; columns say what
+## group (=combination of genotype+time), genotype, and time
+## describe each sample:
+sampleAnnotation2 = read.table("ribo_sample_annotation.tsv",
+                              sep="\t", header=TRUE, row.names=1, check.names=FALSE)
+
+## geneNamesAndDescriptions: data.frame with rownames corresponding to gene
+## ids and three columns:
+## (1) gene :: gene id (same as rownames,
+## (2) symbol :: gene name/symbol
+## (3) description :: gene description
+geneNamesAndDescriptions = read.table("arabidopsis_thaliana_gene_names.tsv.gz",
+                       sep="\t", row.names=1, header=TRUE,
+                       quote="", comment.char="")
+geneNamesAndDescriptions$gene = rownames(geneNamesAndDescriptions)
+geneNamesAndDescriptions =
+        geneNamesAndDescriptions[ , c("gene", "symbol", "description")]
+
+## goAssociations: data.frame indicating what genes are associated with what
+## gene sets, with four columns:
+## (1) gene_ontology_primary_id :: gene set identifier
+## (2) gene_ontology_name :: gene set name
+## (3) gene_ontology_all_ids :: indicates what other gene ontology groups
+##                              have been merged into this gene set; you
+##                              don't need to worry about this column!
+## (4) gene :: the gene ids associated with the gene set identified by
+##             gene_ontology_primary_id column
+goAssociations = read.table("gene_sets.tsv.gz",
+                            sep="\t", row.names=NULL, header=TRUE,
+                            quote="", comment.char="")
+
+# ontogenic groups with the manually added genes
+goAssociations2 = read.table("gene_sets2.csv", 
+                             sep= ",", row.names=NULL, header=TRUE,
+                             quote="", comment.char="")
+
+groupColors = c(
+    "14BENDDAY" = "orchid3",
+    "14BEXDARK" = "darkorchid4",
+    "4GENDDAY" = "royalblue2",
+    "4GEXDARK" = "navy",
+    "COLENDDAY" = "seagreen1",
+    "COLEXDARK" = "seagreen"
+)
+
+heatPalette = colorRampPalette(c("dodgerblue", "lightskyblue", "white",
+                                 "lightgoldenrod", "orangered"))(100)
+```
+
+# Preliminary RNA-Seq and Ribo-Seq 
+```{r}
+# remove the outlier group from rna-counts 
+rnaCounts <- rnaCounts %>% select(-`4GEXDARK4`)
+sampleAnnotation <- sampleAnnotation[colnames(rnaCounts),] 
+
+# remove the outlier group from ribo-counts 
+riboCounts <- riboCounts %>% select(-`4GEXDARK4`)
+sampleAnnotation2 <- sampleAnnotation2[colnames(riboCounts),] 
+```
+
+## DEseq with RNA-seq data
+```{r}
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = rnaCounts,
+    colData = sampleAnnotation,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_RNA <- results(DESeqDataSet)
+clean_DESeq_padj <- which(!is.na(DESeq_Results_RNA$padj))
+RNA_Sig <- sum(DESeq_Results_RNA[clean_DESeq_padj, "padj"] <= 0.1)
+RNA_Sig
+sum(DESeq_Results_RNA[clean_DESeq_padj, "padj"] <= 0.1) * 0.1
+summary(DESeq_Results_RNA)
+```
+
+### Identify significant ontogenic groups 
+```{r}
+clean_DESeq_Results <- DESeq_Results_RNA[clean_DESeq_padj, ]
+significant_genes <- rownames(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results <- data.frame(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results$gene <- significant_genes
+RNA_Result_groupings <- clean_DESeq_Results %>% inner_join(goAssociations, by = "gene")
+RNA_Result_groupings %>% group_by(gene_ontology_name) %>% summarize(count = n()) %>% arrange(desc(count)) %>% 
+  knitr::kable(caption = "Distribution of Significant Genes Groupings for RNA-Seq")
+```
+
+```{r}
+clean_DESeq_padj <- which(!is.na(DESeq_Results_RNA$padj))
+clean_DESeq_Results <- DESeq_Results_RNA[clean_DESeq_padj, ]
+significant_genes <- rownames(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results <- data.frame(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results$gene <- significant_genes
+RNA_Result_groupings <- clean_DESeq_Results %>% inner_join(goAssociations2, by = "gene")
+RNA_Result_groupings %>% group_by(gene_ontology_name) %>% summarize(count = n()) %>% arrange(desc(count)) %>%
+  filter(count >= 10) %>% 
+  knitr::kable(caption = "Distribution of Significant Genes Groupings for RNA-Seq")
+```
+
+### log transformed the data
+```{r}
+lgNorm = log2(counts(DESeqDataSet, normalized=TRUE) + 1)
+```
+
+### get for identified genes and their ontogenic function 
+```{r message=FALSE, warning=FALSE}
+joined_set = inner_join(goAssociations, geneNamesAndDescriptions, by = "gene")
+joined_set_ribo = inner_join(goAssociations, geneNamesAndDescriptions, by = "gene")
+ontology_names <- joined_set %>% distinct(gene_ontology_name)
+ontology_names <- ontology_names[["gene_ontology_name"]]
+ontology_names_all <- goAssociations2 %>% distinct(gene_ontology_name)
+ontology_names_all <- ontology_names_all[["gene_ontology_name"]]
+```
+
+### Overall PCA Plot 
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+pca = prcomp(t(lgNorm))
+pcaData = data.frame(pca$x[ , 1:2])
+pcaData$group = sampleAnnotation[rownames(pcaData), "group"]
+pcaData$sample = rownames(pcaData)
+gg = ggplot(pcaData, aes(x=PC1, y=PC2, color=group, label=sample))
+gg = gg + geom_point(size=2.5, alpha = 0.9)
+gg = gg + scale_color_manual(values=groupColors)
+gg = gg + theme(panel.background = element_rect(fill = 'aliceblue')) + ggtitle("Overall PCA for RNA-Seq")
+print(gg)
+```
+
+#### Specific pHeatmap per Gene Grouping 
+```{r}
+# "pyruvate metabolic process"
+temp_set <- joined_set %>% filter(gene_ontology_name == "pyruvate metabolic process")
+lgGo <- lgNorm[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        labels_row=geneNamesAndDescriptions[rownames(heatData), "symbol"], 
+        main = "pyruvate metabolic process", 
+        show_rownames = FALSE
+  )
+```
+
+```{r}
+# "amino acid transport"
+temp_set <- joined_set %>% filter(gene_ontology_name == "amino acid transport")
+lgGo <- lgNorm[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        labels_row=geneNamesAndDescriptions[rownames(heatData), "symbol"], 
+        main = "amino acid transport", 
+        show_rownames = FALSE
+  )
+```
+
+```{r}
+# "response to light stimulus"
+temp_set <- goAssociations2 %>% filter(gene_ontology_name == "response to light stimulus")
+lgGo <- lgNorm[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        main = "response to light stimulus", 
+        show_rownames = FALSE
+  )
+```
+
+```{r}
+# "cellular aldehyde metabolic process"
+temp_set <- joined_set %>% filter(gene_ontology_name == "cellular aldehyde metabolic process")
+lgGo <- lgNorm[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        labels_row=geneNamesAndDescriptions[rownames(heatData), "symbol"], 
+        main = "cellular aldehyde metabolic process", 
+        show_rownames = FALSE
+  )
+```
+
+## DEseq with ribo-seq data
+```{r}
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = riboCounts,
+    colData = sampleAnnotation2,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_ribo <- results(DESeqDataSet)
+
+clean_DESeq_padj <- which(!is.na(DESeq_Results_ribo$padj))
+Ribo_Sig <- sum(DESeq_Results_ribo[clean_DESeq_padj, "padj"] <= 0.1)
+Ribo_Sig
+sum(DESeq_Results_ribo[clean_DESeq_padj, "padj"] <= 0.1) * 0.1
+summary(DESeq_Results_ribo)
+```
+
+### normalize count data 
+```{r}
+lgNormRibo = log2(counts(DESeqDataSet, normalized=TRUE) + 1)
+```
+
+### Identify significant ontogenic groups 
+```{r}
+clean_DESeq_Results <- DESeq_Results_ribo[clean_DESeq_padj, ]
+significant_genes <- rownames(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results <- data.frame(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results$gene <- significant_genes
+RNA_Result_groupings <- clean_DESeq_Results %>% inner_join(goAssociations, by = "gene")
+RNA_Result_groupings %>% group_by(gene_ontology_name) %>% summarize(count = n()) %>% arrange(desc(count)) %>% filter(count >=2) %>% 
+  knitr::kable(caption = "Distribution of Significant Genes Groupings For Ribo-Seq")
+```
+
+### get for identified genes and their ontogenic function 
+```{r}
+joined_set_ribo = inner_join(goAssociations, geneNamesAndDescriptions, by = "gene")
+ontology_names <- joined_set_ribo %>% distinct(gene_ontology_name)
+ontology_names <- ontology_names[["gene_ontology_name"]]
+```
+
+### Overall PCA for Ribo-Seq 
+```{r message=FALSE, warning=FALSE}
+pca = prcomp(t(lgNormRibo))
+pcaData = data.frame(pca$x[ , 1:2])
+pcaData$group = sampleAnnotation[rownames(pcaData), "group"]
+pcaData$sample = rownames(pcaData)
+
+gg = ggplot(pcaData, aes(x=PC1, y=PC2, color=group, label=sample))
+gg = gg + geom_point(size=2.5, alpha=0.9)
+gg = gg + theme(panel.background = element_rect(fill = 'aliceblue')) + ggtitle("Overall PCA for Ribo-Seq")
+print(gg)
+```
+
+### pHeatmaps for specific groups 
+```{r}
+# "response to light stimulus"
+temp_set <- goAssociations2 %>% filter(gene_ontology_name == "response to light stimulus")
+lgGo <- lgNormRibo[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        main = "response to light stimulus", 
+        show_rownames = FALSE
+  )
+```
+
+```{r}
+# "translation"
+temp_set <- goAssociations2 %>% filter(gene_ontology_name == "translation")
+lgGo <- lgNormRibo[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        main = "translation", 
+        show_rownames = FALSE
+  )
+```
+
+```{r}
+# "photosynthesis"
+temp_set <- goAssociations2 %>% filter(gene_ontology_name == "photosynthesis")
+lgGo <- lgNormRibo[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        main = "photosynthesis", 
+        show_rownames = FALSE
+  )
+```
+
+```{r}
+# "response to cold"
+temp_set <- goAssociations2 %>% filter(gene_ontology_name == "response to cold")
+lgGo <- lgNormRibo[temp_set$gene, ]
+  
+heatData = lgGo - rowMeans(lgGo)
+heatData = as.data.frame(heatData)
+heatData[heatData > 2] = 2; heatData[heatData < -2] = -2
+fontsize_row = 10 - nrow(heatData) / 15
+pheatmap(
+        heatData,
+        color = heatPalette,
+        clustering_method = "average", 
+        main = "response to cold", 
+        show_rownames = FALSE
+  )
+```
+
+# Translational Efficiency 
+
+###Comparison genotypes 14B and 4G, Contrast A
+```{r}
+riboCountsA <- riboCounts %>% select(-contains("COL"))
+rnaCountsA <- rnaCounts %>% select(-contains("COL"))
+sampleAnnotationA <- sampleAnnotation %>% filter(!str_detect(group, 'COL'))
+sampleAnnotation2A <- sampleAnnotation2 %>% filter(!str_detect(group, 'COL'))
+
+# rna and ribo 
+sampleAnnotationA$SeqType = "RNA"
+sampleAnnotation2A$SeqType = "Ribo"
+combinedCountsA = cbind(riboCountsA, rnaCountsA)
+sampleAnnotation3A = rbind(sampleAnnotationA, sampleAnnotation2A)
+colnames(combinedCountsA) = rownames(sampleAnnotation3A)
+
+# time + genotype + time:genotype + SeqType + SeqType:time + SeqType:genotype + SeqType:time:genotype
+
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = combinedCountsA,
+    colData = sampleAnnotation3A,
+    design = ~ time * genotype * SeqType 
+)
+
+DESeqDataSet_both = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ (time + genotype + SeqType)^2
+  ) 
+
+DESeq_Results_both <- results(DESeqDataSet_both)
+clean_DESeq_padj <- which(!is.na(DESeq_Results_both$padj))
+sum(DESeq_Results_both[clean_DESeq_padj, "padj"] <= 0.1)
+sum(DESeq_Results_both[clean_DESeq_padj, "padj"] <= 0.1) * 0.1
+
+# rna 
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = rnaCountsA,
+    colData = sampleAnnotationA,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_RNA <- results(DESeqDataSet)
+
+# ribo 
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = riboCountsA,
+    colData = sampleAnnotation2A,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_ribo <- results(DESeqDataSet)
+```
+
+
+```{r}
+lgNorm = log2(counts(DESeqDataSet_both, normalized=TRUE) + 1)
+```
+
+### Overall PCA Plot 
+```{r message=FALSE, warning=FALSE}
+pca = prcomp(t(lgNorm))
+pcaData = data.frame(pca$x[ , 1:2])
+pcaData$group = sampleAnnotation3A[rownames(pcaData), "group"]
+pcaData$sample = rownames(pcaData)
+gg = ggplot(pcaData, aes(x=PC1, y=PC2, color=group, label=sample))
+gg = gg + geom_point(size=2.5, alpha=0.8)
+gg = gg + scale_color_manual(values=groupColors)
+gg = gg + theme(panel.background = element_rect(fill = 'aliceblue')) + ggtitle("Overall PCA for Translational Efficiency")
+print(gg)
+```
+
+```{r}
+clean_DESeq_padj <- which(!is.na(DESeq_Results_both$padj))
+clean_DESeq_Results <- DESeq_Results_both[clean_DESeq_padj, ]
+significant_genes <- rownames(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results <- data.frame(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results$gene <- significant_genes
+RNA_Result_groupings <- clean_DESeq_Results %>% inner_join(goAssociations2, by = "gene")
+RNA_Result_groupings %>% group_by(gene_ontology_name) %>% summarize(count = n()) %>% arrange(desc(count)) %>% 
+  filter(count >= 5) %>% 
+  knitr::kable(caption = "Distribution of Significant Genes Groupings For TE")
+```
+
+```{r}
+exclusive = rownames(DESeq_Results_both)[which(DESeq_Results_both$padj < 0.1 & DESeq_Results_ribo$padj < 0.1 & DESeq_Results_RNA$padj > 0.1)]
+
+both = rownames(DESeq_Results_both)[which(DESeq_Results_both$padj < 0.1 & DESeq_Results_ribo$padj < 0.1 & DESeq_Results_RNA$padj < 0.1)]
+
+intensified = both[which(DESeq_Results_both[both,2]*DESeq_Results_RNA[both,2] > 0)]
+
+buffered = both[which(DESeq_Results_both[both,2]*DESeq_Results_RNA[both,2] < 0)]
+```
+
+```{r}
+goAssociations2 %>% filter(gene %in% exclusive) %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% 
+  arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for Exclusive TE Results")
+
+goAssociations2 %>% filter(gene %in% both)  %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for 'Both' TE Results")
+
+goAssociations2 %>% filter(gene %in% intensified) %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for Intensified TE Results")
+
+goAssociations2 %>% filter(gene %in% buffered) %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for Buffered TE Results")
+```
+
+```{r}
+goAssociations2 %>% filter(gene %in% exclusive) %>% 
+  knitr::kable(caption = "Gene Groupings for Exclusive TE Results")
+goAssociations2 %>% filter(gene %in% both) %>% 
+  knitr::kable(caption = "Gene Groupings for 'Both' TE Results")
+
+goAssociations2 %>% filter(gene %in% intensified) %>% 
+  knitr::kable(caption = "Gene Groupings for Intensified TE Results")
+goAssociations2 %>% filter(gene %in% buffered) %>% 
+  knitr::kable(caption = "Gene Groupings for Buffered TE Results")
+```
+
+```{r}
+for (id in both){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+Intensified and buffered: Genes regulated both by transcriptional and translational regulation (significant ΔRNA, ΔRPFs, and ΔTE) include intensified and buffered genes. These genes are both DTGs and DTEGs.
+
+All lines going in the same direction --> change in translational efficiency is counteracting the change in RNA 
+
+```{r}
+for (id in exclusive){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+
+exclusive focuses on findings that are translationally different only. 
+
+```{r}
+for (id in intensified){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+
+```{r}
+for (id in buffered){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+
+###Comparison genotypes Col and 14B, Contrast B
+```{r}
+riboCountsB <- riboCounts %>% select(-contains("4G"))
+rnaCountsB <- rnaCounts %>% select(-contains("4G"))
+sampleAnnotationB <- sampleAnnotation %>% filter(!str_detect(group, '4G'))
+sampleAnnotation2B <- sampleAnnotation2 %>% filter(!str_detect(group, '4G'))
+
+# rna and ribo 
+sampleAnnotationB$SeqType = "RNA"
+sampleAnnotation2B$SeqType = "Ribo"
+combinedCountsB = cbind(riboCountsB, rnaCountsB)
+sampleAnnotation3B = rbind(sampleAnnotationB, sampleAnnotation2B)
+colnames(combinedCountsB) = rownames(sampleAnnotation3B)
+
+# time + genotype + time:genotype + SeqType + SeqType:time + SeqType:genotype + SeqType:time:genotype
+
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = combinedCountsB,
+    colData = sampleAnnotation3B,
+    design = ~ time * genotype * SeqType 
+)
+
+DESeqDataSet_both = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ (time + genotype + SeqType)^2
+  ) 
+
+DESeq_Results_both <- results(DESeqDataSet_both)
+clean_DESeq_padj <- which(!is.na(DESeq_Results_both$padj))
+sum(DESeq_Results_both[clean_DESeq_padj, "padj"] <= 0.1)
+sum(DESeq_Results_both[clean_DESeq_padj, "padj"] <= 0.1) * 0.1
+
+# rna 
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = rnaCountsB,
+    colData = sampleAnnotationB,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_RNA <- results(DESeqDataSet)
+
+# ribo 
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = riboCountsB,
+    colData = sampleAnnotation2B,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_ribo <- results(DESeqDataSet)
+```
+
+```{r}
+lgNorm = log2(counts(DESeqDataSet_both, normalized=TRUE) + 1)
+```
+
+### Overall PCA Plot 
+```{r message=FALSE, warning=FALSE}
+pca = prcomp(t(lgNorm))
+pcaData = data.frame(pca$x[ , 1:2])
+pcaData$group = sampleAnnotation3B[rownames(pcaData), "group"]
+pcaData$sample = rownames(pcaData)
+gg = ggplot(pcaData, aes(x=PC1, y=PC2, color=group, label=sample))
+gg = gg + geom_point(size=2.5, alpha=0.8)
+gg = gg + scale_color_manual(values=groupColors)
+gg = gg + theme(panel.background = element_rect(fill = 'aliceblue')) + ggtitle("Overall PCA for Translational Efficiency")
+print(gg)
+```
+
+```{r}
+clean_DESeq_padj <- which(!is.na(DESeq_Results_both$padj))
+clean_DESeq_Results <- DESeq_Results_both[clean_DESeq_padj, ]
+significant_genes <- rownames(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results <- data.frame(clean_DESeq_Results[which(clean_DESeq_Results[,"padj"] <= 0.1), ])
+clean_DESeq_Results$gene <- significant_genes
+RNA_Result_groupings <- clean_DESeq_Results %>% inner_join(goAssociations2, by = "gene")
+RNA_Result_groupings %>% group_by(gene_ontology_name) %>% summarize(count = n()) %>% arrange(desc(count)) %>% 
+  filter(count >= 5) %>% 
+  knitr::kable(caption = "Distribution of Significant Genes Groupings For TE")
+```
+
+```{r}
+exclusive = rownames(DESeq_Results_both)[which(DESeq_Results_both$padj < 0.1 & DESeq_Results_ribo$padj < 0.1 & DESeq_Results_RNA$padj > 0.1)]
+
+both = rownames(DESeq_Results_both)[which(DESeq_Results_both$padj < 0.1 & DESeq_Results_ribo$padj < 0.1 & DESeq_Results_RNA$padj < 0.1)]
+
+intensified = both[which(DESeq_Results_both[both,2]*DESeq_Results_RNA[both,2] > 0)]
+
+buffered = both[which(DESeq_Results_both[both,2]*DESeq_Results_RNA[both,2] < 0)]
+```
+
+```{r}
+goAssociations2 %>% filter(gene %in% exclusive) %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% 
+  arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for Exclusive TE Results")
+
+goAssociations2 %>% filter(gene %in% both)  %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for 'Both' TE Results")
+
+goAssociations2 %>% filter(gene %in% intensified) %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for Intensified TE Results")
+
+goAssociations2 %>% filter(gene %in% buffered) %>% group_by(gene_ontology_name) %>% summarise(count = n()) %>% arrange(desc(count)) %>% knitr::kable(caption = "Gene Groupings for Buffered TE Results")
+```
+
+```{r}
+goAssociations2 %>% filter(gene %in% exclusive) %>% 
+  knitr::kable(caption = "Gene Groupings for Exclusive TE Results")
+goAssociations2 %>% filter(gene %in% both) %>% 
+  knitr::kable(caption = "Gene Groupings for 'Both' TE Results")
+
+goAssociations2 %>% filter(gene %in% intensified) %>% 
+  knitr::kable(caption = "Gene Groupings for Intensified TE Results")
+goAssociations2 %>% filter(gene %in% buffered) %>% 
+  knitr::kable(caption = "Gene Groupings for Buffered TE Results")
+```
+
+```{r}
+for (id in both){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+Intensified and buffered: Genes regulated both by transcriptional and translational regulation (significant ΔRNA, ΔRPFs, and ΔTE) include intensified and buffered genes. These genes are both DTGs and DTEGs.
+
+All lines going in the same direction --> change in translational efficiency is counteracting the change in RNA 
+
+```{r}
+for (id in exclusive){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+
+exclusive focuses on findings that are translationally different only. 
+
+```{r}
+for (id in intensified){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+
+```{r}
+for (id in buffered){
+  ymax=max(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  ymin=min(DESeq_Results_ribo[id,2],DESeq_Results_RNA[id,2],DESeq_Results_both[id,2],0)
+  plot(c(0,1), c(0,DESeq_Results_ribo[id,2]), type="l",col="gray", ylim=c(ymin,ymax), 
+       ylab="Log2 fold change",xlab="",xaxt="n")
+  lines(c(0,1), c(0,DESeq_Results_RNA[id,2]),type="l",col="blue")
+  lines(c(0,1), c(0,DESeq_Results_both[id,2]), type="l",col="red")
+  legend("bottomleft",c("RNA","Ribo","TE"),fill=c("blue","gray","red"), cex=1, border = NA, bty="n")
+  axis(1,at=c(0,1),labels=c(1,2),las=1)
+  title(id)
+}
+```
+
+###Comparison genotypes Col and 4G, Contrast C
+```{r}
+riboCountsC <- riboCounts %>% select(-contains("14B"))
+rnaCountsC <- rnaCounts %>% select(-contains("14B"))
+sampleAnnotationC <- sampleAnnotation %>% filter(!str_detect(group, '14B'))
+sampleAnnotation2C <- sampleAnnotation2 %>% filter(!str_detect(group, '14B'))
+
+# rna and ribo 
+sampleAnnotationC$SeqType = "RNA"
+sampleAnnotation2C$SeqType = "Ribo"
+combinedCountsC = cbind(riboCountsC, rnaCountsC)
+sampleAnnotation3C = rbind(sampleAnnotationC, sampleAnnotation2C)
+colnames(combinedCountsC) = rownames(sampleAnnotation3C)
+
+# time + genotype + time:genotype + SeqType + SeqType:time + SeqType:genotype + SeqType:time:genotype
+
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = combinedCountsC,
+    colData = sampleAnnotation3C,
+    design = ~ time * genotype * SeqType 
+)
+
+DESeqDataSet_both = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ (time + genotype + SeqType)^2
+  ) 
+
+DESeq_Results_both <- results(DESeqDataSet_both)
+clean_DESeq_padj <- which(!is.na(DESeq_Results_both$padj))
+sum(DESeq_Results_both[clean_DESeq_padj, "padj"] <= 0.1)
+sum(DESeq_Results_both[clean_DESeq_padj, "padj"] <= 0.1) * 0.1
+
+# rna 
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = rnaCountsC,
+    colData = sampleAnnotationC,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_RNA <- results(DESeqDataSet)
+
+# ribo 
+DESeqDataSet = DESeqDataSetFromMatrix(
+    countData = riboCountsC,
+    colData = sampleAnnotation2C,
+    design = ~ time + genotype + time:genotype
+)
+
+DESeqDataSet = DESeq(
+  DESeqDataSet, 
+  parallel=FALSE, 
+  test = "LRT", 
+  reduced = ~ time + genotype
+  ) 
+
+DESeq_Results_ribo <- results(DESeqDataSet)
+```
+
+```{r}
+lgNorm = log2(counts(DESeqDataSet_both, normalized=TRUE) + 1)
+```
+
+### Overall PCA Plot 
+```{r message=FALSE, warning=FALSE}
+pca = prcomp(t(lgNorm))
+pcaData = data.frame(pca$x[ , 1:2])
+pcaData$group = sampleAnnotation3C[rownames(pcaData), "group"]
+pcaData$sample = rownames(pcaData)
+gg = ggplot(pcaData, aes(x=PC1, y=PC2, color=group, label=sample))
+gg = gg + geom_point(size=2.5, alpha=0.8)
+gg = gg + scale_color_manual(values=groupColors)
+gg = gg + theme(panel.background = element_rect(fill = 'aliceblue')) + ggtitle("Overall PCA for Translational Efficiency")
+print(gg)
+```
